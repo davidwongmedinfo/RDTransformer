@@ -251,28 +251,28 @@ def write_fasta_file(records, filename):
 
 if __name__ == "__main__":
 
-    # Path to the original finetuning data
-    original_excel_path = "../data/raw/finetuning/500条微调序列汇总总表0925分类.xlsx"
+    # Path to the original finetune data
+    original_excel_path = "../data/raw/finetune/500条微调序列汇总总表0925分类.xlsx"
     # Output path for the preprocessed DataFrame  
-    preprocessed_dataframe_output_path = "../data/preprocessed/finetuning/finetuning_data.csv"
+    preprocessed_dataframe_output_path = "../data/preprocessed/finetune/finetune_data.csv"
     # Output FASTA file path for CD-HIT redundancy removal
-    fasta_file_path_for_CDHIT = "../data/preprocessed/finetuning/finetuning_seqs_4cdhit.fasta"
+    fasta_file_path_for_CDHIT = "../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta"
     # Output path for CD-HIT redundancy removal results
-    cdhit_output_path = "../data/preprocessed/finetuning/remove_redundancy"
+    cdhit_output_path = "../data/preprocessed/finetune/remove_redundancy"
     # Path to the reference sequence (wild-type) for alignment
-    reference_sequence_path = "../data/raw/finetuning/mRNA_045_WT.fasta"
+    reference_sequence_path = "../data/raw/finetune/mRNA_045_WT.fasta"
     # Output path for sequence alignment
-    alignment_output_path = "../data/preprocessed/finetuning/aligned_sequences.fasta"
+    alignment_output_path = "../data/preprocessed/finetune/aligned_sequences.fasta"
     # Directory for storing WB label-based dataset splits
-    wb_splits_dir = '../data/preprocessed/finetuning/wb_splits/'
+    wb_splits_dir = '../data/preprocessed/finetune/wb_splits/'
     os.makedirs(wb_splits_dir, exist_ok=True)
     # Directory for storing ELISA label-based dataset splits
-    elisa_splits_dir = '../data/preprocessed/finetuning/elisa_splits/'
+    elisa_splits_dir = '../data/preprocessed/finetune/elisa_splits/'
     os.makedirs(elisa_splits_dir, exist_ok=True)
  
 
     # 1. Read original excel file
-    file_path = '../data/raw/finetuning/500条微调序列汇总总表0925分类.xlsx'
+    file_path = '../data/raw/finetune/500条微调序列汇总总表0925分类.xlsx'
     df = pd.read_excel(file_path)
     # print(df.head())
 
@@ -312,9 +312,9 @@ if __name__ == "__main__":
     elapsed_time = end_time - start_time
     time_delta = timedelta(seconds=elapsed_time)
     print(f"CD-HIT-EST redundancy removal time: {time_delta}")
-    # Fasta file successfully written to ../data/preprocessed/finetuning/finetuning_seqs_4cdhit.fasta
+    # Fasta file successfully written to ../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta
     # INFO:
-    # Executing CD-HIT-EST command: cd-hit-est -i ../data/preprocessed/finetuning/finetuning_seqs_4cdhit.fasta -o ../data/preprocessed/finetuning/remove_redundancy.fasta -c 1.0 -n 5 -M 64000 -T 32 -G 1 -d 0:Redundancy removal completed! Input sequences: 500, Output sequences: 500, Redundancy: 0.0%
+    # Executing CD-HIT-EST command: cd-hit-est -i ../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta -o ../data/preprocessed/finetune/remove_redundancy.fasta -c 1.0 -n 5 -M 64000 -T 32 -G 1 -d 0:Redundancy removal completed! Input sequences: 500, Output sequences: 500, Redundancy: 0.0%
     # CD-HIT-EST redundancy removal time: 0:00:00.276456
 
     # 6. Align wild-type sequences to wild-type sequence
