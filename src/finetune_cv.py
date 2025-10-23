@@ -796,7 +796,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
 
 # -----------------------------
-# Main fine-tuning entrypoint
+# Main fine-tuning
 # -----------------------------
 def main_finetune(config):
     """
@@ -835,7 +835,6 @@ def main_finetune(config):
         raise RuntimeError(f"Failed loading pretrained_kmer_json {pretrained_kmer_json}: {e}")
 
     # 2. Build full dataset for K-fold CV (use pretrained kmer_to_idx)
-    print("Loading full dataset for 4-fold CV...")
     full_dataset = SequenceDataset(
         fasta_file=finetune_combined_fasta,
         kmer_size=config.kmer_size,
@@ -847,6 +846,7 @@ def main_finetune(config):
         reference_sequence=wt_seq,
         label_type=config.label
     )
+    print("Loaded full dataset for 4-fold CV.")
     n_samples = len(full_dataset)
     print(f"Full dataset size: {n_samples}")
     print("Label classes (finetune):", full_dataset.label_encoder.classes_)
@@ -1333,7 +1333,7 @@ if __name__ == "__main__":
     # -----------------------------
     # YAML config loader
     # -----------------------------
-    parser = argparse.ArgumentParser(description="Fine-tune script")
+    parser = argparse.ArgumentParser(description="Fine-tune cross-validation script")
     parser.add_argument('--config', type=str, default='configs/finetune.yaml', help='Path to YAML config file (optional); set "" to skip')
     parser.add_argument('--override', nargs='*', default=None, help='Optional overrides, e.g. --override learning_rate=1e-4 batch_size=8')
     args, _ = parser.parse_known_args()
@@ -1436,7 +1436,7 @@ if __name__ == "__main__":
         if not os.path.exists(p):
             raise FileNotFoundError(f"Path for config.{name} not found: {p}")
 
-    # Final logging: be explicit about where config came from
+    # Final logging
     src = f"YAML: {args.config}" if loaded_yaml else "dataclass defaults"
     print(f"Config source: {src}; overrides: {args.override}")
     print("Final config (after YAML/overrides):", config, "\n")
