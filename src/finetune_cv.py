@@ -1132,7 +1132,6 @@ def main_finetune(config):
         pt_auc, l_auc, u_auc, n_auc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auroc', n_bootstrap=config.n_boot, seed=SEED)
         pt_auprc, l_auprc, u_auprc, n_auprc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auprc', n_bootstrap=config.n_boot, seed=SEED+1)
         pt_brier, l_brier, u_brier, n_brier_boots = bootstrap_ci(pooled_true, pooled_prob, metric='brier', n_bootstrap=config.n_boot, seed=SEED+2)
-        print(pt_brier, l_brier, u_brier, n_brier_boots)
 
         auc_text = f"AUROC = {pt_auc:.3f}\n95% CI [{l_auc:.3f}, {u_auc:.3f}]"
         auprc_text = f"AUPRC = {pt_auprc:.3f}\n95% CI [{l_auprc:.3f}, {u_auprc:.3f}]"
