@@ -9,11 +9,11 @@
 ---
 
 ## 📚 Data
-The pretraining data was sourced from the [**RNAcentral** database](https://rnacentral.org/).
+The pretraining data was sourced from the [**RNAcentral** database](https://rnacentral.org/).  
 **Citation:**
-> RNAcentral Consortium.
-> RNAcentral 2021: secondary structure integration, improved sequence search and new member databases.
-> Nucleic Acids Research, 2021; 49(D1):D212-D220.
+> RNAcentral Consortium.  
+> RNAcentral 2021: secondary structure integration, improved sequence search and new member databases.  
+> Nucleic Acids Research, 2021; 49(D1):D212-D220.  
 > [https://doi.org/10.1093/nar/gkaa921](https://doi.org/10.1093/nar/gkaa921)
 
 Both raw and preprocessed pretraining datasets are available [here](https://github.com/davidwongmedinfo/RDTransformer/tree/main/data).
