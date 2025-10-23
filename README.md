@@ -28,7 +28,7 @@ The full implementation is available [here](https://github.com/davidwongmedinfo/
 ## ⚙️ Environment Setup
 **1. Create environment:**
 ```bash
-conda env create -f rdt_env.yml
+conda env create -f environment.yml
 ```
 > **Note**: This is a CPU-only environment to maximize compatibility. The original experiments in the paper were conducted with the following configuration:
 > - PyTorch 2.6.0 + CUDA 12.4  
