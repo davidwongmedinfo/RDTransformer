@@ -4,7 +4,7 @@
 ---
 
 ## 🧠 Architecture
-![Architecture of the RDTransformer](https://github.com/davidwongmedinfo/RDTransformer/tree/main/architecture.png)
+![Architecture of the RDTransformer](https://raw.githubusercontent.com/davidwongmedinfo/RDTransformer/main/architecture.png)
 
 ---
 
