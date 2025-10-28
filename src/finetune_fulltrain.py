@@ -61,7 +61,7 @@ REFERENCE_COLOR = 'grey'
 @dataclass
 class Config:
     # Data / preprocessing (must match the pretrained model)
-    kmer_size: int = 3  #  
+    kmer_size: int = 3  
     pretrain_num_classes: int = 6   
     max_seq_length: int = 2048   
     # Model architecture

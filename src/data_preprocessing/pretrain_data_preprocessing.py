@@ -316,23 +316,23 @@ def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=4
 if __name__ == "__main__":
 
     # Path to the raw RNA sequence data file 
-    source_fasta_file = "../data/raw/pretrain/RNA_central_sequences.fasta"
+    source_fasta_file = "../../data/raw/pretrain/RNA_central_sequences.fasta"
     # Path for validated sequences after filtering non-AUGC characters
-    validated_fasta_path = "../data/preprocessed/pretrain/validated_seqs.fasta"  
+    validated_fasta_path = "../../data/preprocessed/pretrain/validated_seqs.fasta"  
     # Length filtering parameters
     len_thresh = 2048  # length distribution analysis
     min_len = 50
     max_len = 2048
     # Path for length-filtered sequences
-    length_filtered_fasta_path  = "../data/preprocessed/pretrain/length_filtered_seqs.fasta"
+    length_filtered_fasta_path  = "../../data/preprocessed/pretrain/length_filtered_seqs.fasta"
     # Output path for CD-HIT redundancy removal  
-    cdhit_output_path = "../data/preprocessed/pretrain/remove_redundancy/non_redundancy"
+    cdhit_output_path = "../../data/preprocessed/pretrain/remove_redundancy/non_redundancy"
     # Directory for dataset splits (train & val)
-    dataset_split_output_dir = "../data/preprocessed/pretrain/splits/"
+    dataset_split_output_dir = "../../data/preprocessed/pretrain/splits/"
     os.makedirs(dataset_split_output_dir, exist_ok=True)
     # Output paths for dataset splits 
-    train_output_path = "../data/split_data/pretrain_train_set.fasta"
-    test_output_path = "../data/split_data/pretrain_val_set.fasta"
+    train_output_path = "../../data/preprocessed/pretrain/splits/pretrain_train_set.fasta"
+    val_output_path = "../../data/preprocessed/pretrain/splits/pretrain_val_set.fasta"
 
 
     # 1. Check duplicate IDs and sequences
@@ -380,8 +380,8 @@ if __name__ == "__main__":
     # 7. Split into training and validation sets​​  
     stats = stratified_split_fasta(
         input_fasta = cdhit_output_path + '.fasta',
-        train_output = os.path.join(dataset_split_output_dir, 'pretrain_train_set.fasta'),
-        test_output = os.path.join(dataset_split_output_dir, 'pretrain_val_set.fasta'),
+        train_output = train_output_path,
+        test_output = val_output_path,
         random_seed = SEED,
         test_ratio = 0.1   
     )
