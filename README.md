@@ -63,7 +63,7 @@ python finetune_cv.py --config finetune_configs/elisa_cv_config.yaml
 python finetune_fulltrain.py --config finetune_configs/wb_fulltrain_config.yaml
 python finetune_fulltrain.py --config finetune_configs/elisa_fulltrain_config.yaml
 ```
-**4. Run evaluation on held-out test set:**
+**4. Run evaluation on held-out test set:**  
 ```bash
 python finetune_test.py --config finetune_configs/wb_test_config.yaml
 python finetune_test.py --config finetune_configs/elisa_test_config.yaml
