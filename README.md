@@ -49,6 +49,7 @@ conda activate rdt_env
 
 ## 🚀 Run Scripts:
 **Configure finetuning using the YAML files in `src/finetune_configs/`, then run scripts from `src/`**
+
 **1. Run pretraining:**
 ```bash
 python pretrain.py
@@ -63,7 +64,7 @@ python finetune_cv.py --config finetune_configs/elisa_cv_config.yaml
 python finetune_fulltrain.py --config finetune_configs/wb_fulltrain_config.yaml
 python finetune_fulltrain.py --config finetune_configs/elisa_fulltrain_config.yaml
 ```
-**4. Run evaluation on held-out test set:**  
+**4. Run evaluation on held-out test set:**
 ```bash
 python finetune_test.py --config finetune_configs/wb_test_config.yaml
 python finetune_test.py --config finetune_configs/elisa_test_config.yaml
