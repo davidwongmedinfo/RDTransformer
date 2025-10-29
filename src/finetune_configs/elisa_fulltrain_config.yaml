@@ -3,10 +3,10 @@ kmer_size: 3
 pretrain_num_classes: 6   
 max_seq_length: 2048   
 # Model architecture
-embedding_dim: 64  # (must match the pretrained model)
-num_heads: 4  # (must match the pretrained model)
-num_layers: 2  # (must match the pretrained model)
-hidden_dim: 192  # (must match the pretrained model)
+embedding_dim: 64  # must match the pretrained model
+num_heads: 4  # must match the pretrained model
+num_layers: 2  # must match the pretrained model
+hidden_dim: 192  # must match the pretrained model
 dropout_rate: 0.1
 hidden_dim_for_binary_classifier: 32
 # Training hyperparameters
@@ -33,7 +33,7 @@ seed: 42
 # Paths for pretrain checkpoint, kmer vocab and finetune fasta
 pretrained_ckpt_path: "pretrain_save_20250923_1727/pretrained_best_model_epoch436.pth"
 pretrained_kmer_json: "pretrain_save_20250923_1727/pretrained_kmer_to_idx.json"
-finetune_combined_fasta: "../data/preprocessed/finetuning/elisa_splits/ELISA_finetune_trainval_set.fasta"
+finetune_combined_fasta: "../data/preprocessed/finetune/elisa_splits/elisa_finetune_trainval_set.fasta"
 reference_fasta: "../data/raw/mRNA_045_WT.fasta"
 # Label type
 label: "elisa"

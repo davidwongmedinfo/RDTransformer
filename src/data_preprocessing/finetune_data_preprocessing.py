@@ -177,7 +177,7 @@ def run_cdhit_est(input_fasta, output_prefix, c, n, M=16000, T=16, G=1):
 
 def stratified_split_fasta(input_fasta, trainval_output, test_output, random_seed=SEED, test_ratio=0.2, label_type=None):
     """
-    Performs stratified sampling by label to split data into training/validation and test sets.
+    Performs stratified sampling by label to split data into train/validation and test sets.
     label_type: Type of label to extract from the description, either 'wb' or 'elisa'
     """
     rng = random.Random(random_seed)
@@ -235,7 +235,7 @@ def stratified_split_fasta(input_fasta, trainval_output, test_output, random_see
     write_fasta_file(test_seqs, test_output)  
     
     # Report label counts in train/val and test sets
-    print("Label counts in training/validation set:")
+    print("Label counts in train/validation set:")
     for rna_label, count in trainval_counts.items():
         print(f"{rna_label}: {count}")
 
@@ -264,10 +264,10 @@ if __name__ == "__main__":
     # Output path for sequence alignment
     alignment_output_path = "../../data/preprocessed/finetune/aligned_sequences.fasta"
     # Directory for storing WB label-based dataset splits
-    wb_splits_dir = '../../data/preprocessed/finetune/wb_splits/'
+    wb_splits_dir = "../../data/preprocessed/finetune/wb_splits/"
     os.makedirs(wb_splits_dir, exist_ok=True)
     # Directory for storing ELISA label-based dataset splits
-    elisa_splits_dir = '../../data/preprocessed/finetune/elisa_splits/'
+    elisa_splits_dir = "../../data/preprocessed/finetune/elisa_splits/"
     os.makedirs(elisa_splits_dir, exist_ok=True)
  
 
@@ -329,12 +329,12 @@ if __name__ == "__main__":
     # Verify alignment results by checking sequence lengths
     validate_alignment(alignment_output_path)
 
-    # 7. Split into training and validation sets​​ by WB label
+    # 7. Split into train and validation sets​​ by WB label
     print('\n==============')
     stratified_split_fasta(
         input_fasta = alignment_output_path,
-        trainval_output = os.path.join(wb_splits_dir, 'WB_finetune_trainval_set.fasta'),
-        test_output = os.path.join(wb_splits_dir, 'WB_finetune_test_set.fasta'),
+        trainval_output = os.path.join(wb_splits_dir, 'wb_finetune_trainval_set.fasta'),
+        test_output = os.path.join(wb_splits_dir, 'wb_finetune_test_set.fasta'),
         random_seed = SEED,
         test_ratio = 0.2,  
         label_type = 'wb'
@@ -343,19 +343,19 @@ if __name__ == "__main__":
     # Count statistics per label:
     # 0: 240
     # 1: 260
-    # Label counts in training/validation set:
+    # Label counts in train/validation set:
     # 0: 192
     # 1: 208
     # Label counts in test set:
     # 0: 48
     # 1: 52
 
-    # Split into training and validation sets​​ by ELISA label
+    # Split into train and validation sets​​ by ELISA label
     print('\n==============')
     stratified_split_fasta(
         input_fasta = alignment_output_path,
-        trainval_output = os.path.join(elisa_splits_dir, 'ELISA_finetune_trainval_set.fasta'),
-        test_output = os.path.join(elisa_splits_dir, 'ELISA_finetune_test_set.fasta'),
+        trainval_output = os.path.join(elisa_splits_dir, 'elisa_finetune_trainval_set.fasta'),
+        test_output = os.path.join(elisa_splits_dir, 'elisa_finetune_test_set.fasta'),
         random_seed=SEED,
         test_ratio=0.2,   
         label_type='elisa'
@@ -364,7 +364,7 @@ if __name__ == "__main__":
     # Count statistics per label:
     # 0: 232
     # 1: 268
-    # Label counts in training/validation set:
+    # Label counts in train/validation set:
     # 0: 186
     # 1: 215
     # Label counts in test set:

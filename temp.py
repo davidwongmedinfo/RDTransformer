@@ -1,374 +1,338 @@
-import pandas as pd
-import re
-import time
-import subprocess
-from datetime import timedelta
-import logging
 import os
 import sys
-from collections import defaultdict
-import random
+import json
 import numpy as np
+from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
+from torch.utils.data import Dataset
 from Bio import SeqIO
-from Bio.Seq import Seq
-from mafft_aligner import run_mafft_and_write, validate_alignment
+from sklearn.preprocessing import LabelEncoder
+import torch
 
 
-# Random seed  
-SEED = 42
-
-def check_sequence_characters(df):
+class SequenceDataset(Dataset):
     """
-    Check if sequences in the 'Sequence' column contain only AUGC characters.
+    A Dataset that reads sequences from a FASTA file and converts them to k-mer indices.
+
+    Assumptions:
+    - FASTA description line format: ">sequence_id|wb_label|elisa_label"
+    - When used with is_train=False, a pre-built kmer_to_idx dict must be supplied so vocabulary is shared with pretraining or fulltraining.
     """
-    # Validate input columns
-    if 'Sequence' not in df.columns or 'ID' not in df.columns:
-        raise ValueError("DataFrame must contain both 'Sequence' and 'ID' columns")
-    
-    # Define the set of valid characters
-    valid_chars = {'A', 'U', 'G', 'C'}
-    invalid_entries = []
-    
-    # Process each row
-    for index, row in df.iterrows():
-        seq = row['Sequence']
-        seq_id = row['ID']
+    def __init__(self, fasta_file, kmer_size=3, max_length=2048, is_train=True, kmer_to_idx=None, label_encoder=None, compute_class_weights=False, reference_sequence=None, label_type=None):
+        self.kmer_size = kmer_size
+        self.max_length = max_length
+        self.sequences = []
+        self.labels = []
+        self.ids = []  
+        self.compute_class_weights = compute_class_weights
+        self.class_weights = None
+        self.gap_token = '-'
         
-        # Remove whitespace (including spaces, tabs, etc.)
-        if isinstance(seq, str):
-            cleaned_seq = re.sub(r'\s+', '', seq)
-            df.at[index, 'Sequence'] = cleaned_seq
+        # Read FASTA and extract sequence, label and id
+        for record in SeqIO.parse(fasta_file, "fasta"):
+            seq = str(record.seq)
+            # Description format: "sequence_id|wb_label|elisa_label"
+            parts = record.description.split('|')
+            seq_id = parts[0].strip()
+            lt = label_type if label_type is not None else 'wb'
+            if lt == 'wb':
+                if len(parts) < 2:
+                    raise ValueError(f"FASTA description missing wb label: {record.description}")
+                label = parts[1].strip()
+            elif lt == 'elisa':
+                # Guard missing third field
+                if len(parts) < 3:
+                    raise ValueError(f"FASTA description missing elisa label: {record.description}")
+                label = parts[2].strip()
+            else:
+                raise ValueError(f"Invalid label type: '{lt}'. Must be 'wb' or 'elisa'")
+
+            self.sequences.append(seq)
+            self.labels.append(label)
+            self.ids.append(seq_id)
+
+        # Fit or use provided LabelEncoder
+        if label_encoder is None:
+            self.label_encoder = LabelEncoder()
+            self.labels = self.label_encoder.fit_transform(self.labels)
         else:
-            cleaned_seq = seq
+            self.label_encoder = label_encoder
+            self.labels = self.label_encoder.transform(self.labels)
+
+        # Compute class weights for training set if requested (optional)
+        if compute_class_weights:  
+            self.class_weights = self._compute_class_weights()
         
-        # Skip non-string types
-        if not isinstance(cleaned_seq, str):
-            invalid_chars = {f"Non-string type ({type(cleaned_seq).__name__})"}
-            invalid_entries.append((seq_id, invalid_chars))
-            continue
+        # Build k-mer vocabulary if training; otherwise use provided mapping
+        if is_train:
+            self.build_vocab()
+        else:
+            if kmer_to_idx is None:
+                raise ValueError("kmer_to_idx must be provided for validation/test sets")
+            self.kmer_to_idx = kmer_to_idx
+            self.vocab_size = len(kmer_to_idx) + 1  # +1 for padding index 0
         
-        # Check each character
-        invalid_chars = set()
-        for char in cleaned_seq.upper():  # Convert to uppercase for checking
-            if char not in valid_chars:
-                invalid_chars.add(char)
+        # Precompute k-mer index sequences
+        self.kmer_indices = [self.sequence_to_kmers(seq) for seq in self.sequences]
+
+        # Prepare reference sequence indices (optional)
+        if reference_sequence:
+            self.reference_indices = self.sequence_to_kmers(reference_sequence)
+    
+    def get_reference_indices(self):
+        """Return reference sequence k-mer index list if provided, else None."""
+        return getattr(self, "reference_indices", None)
+
+    def _compute_class_weights(self):
+        """Compute balanced class weights and return dict mapping class_index -> weight."""
+        unique_classes = np.unique(self.labels)
+        weights = compute_class_weight('balanced', classes=unique_classes, y=self.labels)
+        class_weights = {cls: weight for cls, weight in zip(unique_classes, weights)}
+        return class_weights
+    
+    def build_vocab(self):
+        """Build k-mer vocabulary from training sequences. Reserve index 0 for padding."""
+        all_kmers = []
+        for seq in self.sequences:
+            kmers = self.extract_kmers(seq)
+            all_kmers.extend(kmers)
         
-        if invalid_chars:
-            invalid_entries.append((seq_id, invalid_chars))
+        kmer_counter = collections.Counter(all_kmers)
+        sorted_kmers = sorted(kmer_counter.items(), key=lambda x: x[1], reverse=True)
+        # Indices start at 1; 0 is reserved for padding
+        self.kmer_to_idx = {kmer: idx+1 for idx, (kmer, _) in enumerate(sorted_kmers)}  # index 0 reserved for padding
+        self.vocab_size = len(self.kmer_to_idx) + 1  # +1 for padding index 0
     
-    # Output results
-    if not invalid_entries:
-        print("\nAll sequences contain only AUGC characters.")
-    else:
-        print("\nThe following sequences contain invalid characters:")
-        for seq_id, invalid_chars in invalid_entries:
-            sorted_chars = sorted(invalid_chars)  # Sort invalid characters
-            chars_str = ", ".join(sorted_chars)
-            print(f"ID: {seq_id}, Invalid characters: {chars_str}")
+    def extract_kmers(self, sequence):
+        """Return overlapping k-mers from a raw sequence string."""
+        kmers = []
+        for i in range(len(sequence) - self.kmer_size + 1):
+            kmer = sequence[i:i+self.kmer_size]
+            kmers.append(kmer)
+        return kmers
     
-    return df
-
-
-def process_dataframe(df, wb_thrd, elisa_thrd):
-    # Create a copy to avoid modifying the original DataFrame
-    result_df = df.copy()
+    def sequence_to_kmers(self, sequence):
+        """Convert sequence to fixed-length k-mer index list (padding or truncation)."""
+        kmers = self.extract_kmers(sequence)
+        indices = []
+        for kmer in kmers:
+            # Treat any k-mer containing gap_token as padding (skip)
+            if self.gap_token is not None and self.gap_token in kmer:
+                indices.append(0)   
+            else:
+                indices.append(self.kmer_to_idx.get(kmer, 0))
+        # Padding or truncation to max_length
+        if len(indices) > self.max_length:
+            indices = indices[:self.max_length]
+        else:
+            indices += [0] * (self.max_length - len(indices))
+        return indices
     
-    # Calculate sequence length and store in new column
-    result_df['Seq_len'] = result_df['Sequence'].str.len()
+    def __len__(self):
+        return len(self.sequences)
     
-    # Generate binary labels based on wb_thrd threshold
-    result_df['Label_wb'] = (result_df['Exp_value(WB)'] >= wb_thrd).astype(int)
-    # result_df['Label_wb'] = (result_df['WB'] >= wb_thrd).astype(int)
-    
-    # Generate binary labels based on elisa_thrd threshold
-    result_df['Label_elisa'] = (result_df['Exp_value(ELISA)'] >= elisa_thrd).astype(int)
-    # result_df['Label_elisa'] = (result_df['IgG'] >= elisa_thrd).astype(int)
-    
-    # Create combined ID with both wb and elisa labels
-    result_df['ID_with_Label'] = (result_df['ID'].astype(str) + '|' + 
-                                  result_df['Label_wb'].astype(str) + '|' + 
-                                  result_df['Label_elisa'].astype(str))
+    def __getitem__(self, idx):
+        """Return (kmer_index_tensor, label_tensor, id_str)."""
+        return torch.tensor(self.kmer_indices[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long), self.ids[idx]
 
-    # Calculate and print label distribution statistics
-    wb_counts = result_df['Label_wb'].value_counts()
-    elisa_counts = result_df['Label_elisa'].value_counts()
-    print("\nLabel_wb positive/negative sample count ratio:")
-    print(f"Positive(1):Negative(0) = {wb_counts.get(1, 0)} : {wb_counts.get(0, 0)}")
-    print("Label_elisa positive/negative sample count ratio:")
-    print(f"Positive(1):Negative(0) = {elisa_counts.get(1, 0)} : {elisa_counts.get(0, 0)}")
-
-    return result_df
-
-def write_fasta(df, output_file):
-    # Write FASTA format: sequence written as single line without extra newline
-    with open(output_file, 'w') as f:
-        for _, row in df.iterrows():
-            seq_id = str(row['ID_with_Label'])
-            sequence = str(row['Sequence'])
-            f.write(f">{seq_id}\n")
-            f.write(f"{sequence}\n")   
-    print(f'\nFasta file successfully written to {output_file}')
-
-def run_cdhit_est(input_fasta, output_prefix, c, n, M=16000, T=16, G=1):
+def validate_and_normalize_config(config, yaml_cfg=None):
     """
-    Remove sequence redundancy using CD-HIT-EST
+    Cast common config fields to the expected Python types (int/float/bool).
+    Call this after applying YAML values and CLI overrides, before using config.
+    """
+    # cast ints
+    int_fields = ['batch_size', 'num_epochs', 'num_workers', 'n_boot', 'seed',
+                  'kmer_size', 'max_seq_length', 'num_layers', 'pretrain_num_classes']
+    for k in int_fields:
+        if hasattr(config, k):
+            v = getattr(config, k)
+            if v is not None:
+                try:
+                    setattr(config, k, int(v))
+                except Exception:
+                    raise ValueError(f"Config.{k} must be int-like (got {v!r})")
+
+    # cast floats
+    float_fields = ['learning_rate', 'weight_decay', 'lr_min', 'start_factor', 'end_factor', 'max_grad_norm', 'dropout_rate']
+    for k in float_fields:
+        if hasattr(config, k):
+            v = getattr(config, k)
+            if v is not None:
+                try:
+                    setattr(config, k, float(v))
+                except Exception:
+                    raise ValueError(f"Config.{k} must be float-like (got {v!r})")
+
+    # bools from strings (e.g. "False" -> False)
+    bool_fields = ['use_class_weights']
+    for k in bool_fields:
+        if hasattr(config, k):
+            v = getattr(config, k)
+            if isinstance(v, str):
+                lower = v.strip().lower()
+                if lower in ('true', '1', 'yes'):
+                    setattr(config, k, True)
+                elif lower in ('false', '0', 'no', ''):
+                    setattr(config, k, False)
+                else:
+                    raise ValueError(f"Config.{k} must be boolean-like (got {v!r})")
+
+    return config
+
+def save_config(config_obj, output_folder, save_name):
+    """
+    Save config object to JSON. Works if config is a dataclass or a plain object.
+    Uses default=str in json.dump to guard against non-serializable types.
+    """
+    config_path = os.path.join(output_folder, save_name)
+    try:
+        if is_dataclass(config_obj):
+            config_dict = asdict(config_obj)
+        else:
+            config_dict = {k: v for k, v in vars(config_obj).items() if not k.startswith("_") and not callable(v)}
+    except Exception:
+        config_dict = {k: str(v) for k, v in vars(config_obj).items() if not k.startswith("_")}
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=4, default=str)
+    print(f"Training configuration saved to: {config_path}")
+
+def safe_index_or_max(arr, idx):
+    """
+    Safely return arr[idx] if available and not NaN, otherwise return max(arr).
+    This helper avoids index or empty-array errors when extracting 'best epoch' metrics.
+    """
+    arr = np.array(arr, dtype=float)
+    if arr.size == 0:
+        return np.nan
+    if idx is not None and 0 <= idx < arr.size and not np.isnan(arr[int(idx)]):
+        return float(arr[int(idx)])
+    try:
+        return float(np.nanmax(arr))
+    except ValueError:
+        return np.nan
+
+def expected_calibration_error(true_binary, prob_pos, n_bins=8, strategy='quantile'):
+    """
+    Compute ECE (expected calibration error).
+    Supports two strategies for bin edges:
+    - 'uniform' : equal-width bins on [0,1]
+    - 'quantile' : quantile-based bins so each bin has ~equal number of samples
+    """
+    true_binary = np.asarray(true_binary)
+    prob_pos = np.asarray(prob_pos)
+    # ​​Return NaN for empty predictions (safeguard)​
+    if prob_pos.size == 0:
+        return float(np.nan)
+
+    # Choose bin edges
+    if strategy == 'quantile':
+        try:
+            bins = np.quantile(prob_pos, np.linspace(0.0, 1.0, n_bins + 1))
+            # If quantile edges collapsed (e.g. constant probabilities), fallback to uniform bins
+            if np.any(np.diff(bins) <= 0):
+                bins = np.linspace(0.0, 1.0, n_bins + 1)
+        except Exception:
+            bins = np.linspace(0.0, 1.0, n_bins + 1)
+    else:
+        # default: uniform / equal-width bins
+        bins = np.linspace(0.0, 1.0, n_bins + 1)
+
+    # Map probabilities to bin ids (0..n_bins-1)
+    binids = np.digitize(prob_pos, bins) - 1
+    # Clip to valid range in case of edge values
+    binids = np.clip(binids, 0, n_bins - 1)
+
+    ece = 0.0
+    total = len(prob_pos)
+    for b in range(n_bins):
+        mask = binids == b
+        if mask.sum() > 0:
+            acc = true_binary[mask].mean()
+            conf = prob_pos[mask].mean()
+            ece += (mask.sum() / total) * abs(acc - conf)
+    return float(ece)
+
+def bootstrap_ci(y_true, y_score, metric=None, n_bootstrap=None, seed=None):
+    """
+    Compute bootstrap 95% CI for a given metric on (y_true, y_score).
+    Returns: (point_estimate, lower_95, upper_95, n_valid_boots)
+    metric is one of 'auroc', 'auprc', 'brier'.
+    """
+    rng = np.random.RandomState(seed)
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    n = len(y_true)
+    # Return NaNs if no samples
+    if n == 0:
+        return np.nan, np.nan, np.nan, 0
+
+    # point estimate  
+    try:
+        if metric == 'auroc':
+            pt = float(roc_auc_score(y_true, y_score))
+        elif metric == 'auprc':
+            pt = float(average_precision_score(y_true, y_score))
+        elif metric == 'brier':
+            pt = float(brier_score_loss(y_true, y_score))
+        else:
+            raise ValueError("metric must be 'auroc'|'auprc'|'brier'")
+    except Exception:
+        pt = np.nan
+
+    boots = []
+    n_boot = int(n_bootstrap)
+    # Generate bootstrap samples with replacement
+    for _ in range(n_boot):
+        idx = rng.randint(0, n, n)  # Uniform random sampling 
+        yt = y_true[idx]; ys = y_score[idx]
+        try:
+            if metric == 'auroc':
+                val = float(roc_auc_score(yt, ys))
+            elif metric == 'auprc':
+                val = float(average_precision_score(yt, ys))
+            else:
+                val = float(brier_score_loss(yt, ys))
+        except Exception:
+            val = np.nan
+        boots.append(val)
     
-    Parameters:
-    input_fasta: Path to input FASTA file
-    output_prefix: Output file prefix (without extension)
-    c: Sequence similarity threshold (0-1, default 0.9)
-    n: Word length (default 5)
-    M: Maximum memory in MB (default 16000=16GB)
-    T: Number of CPU cores (default 4)
-    G: Use global alignment (default 1=yes)
+    # Exclude bootstrap samples that resulted in NaN  
+    boots = np.array(boots, dtype=float)
+    boots = boots[~np.isnan(boots)]
+    # Return NaNs if no valid bootstrap samples
+    if boots.size == 0:
+        return pt, np.nan, np.nan, 0
+    # Compute 95% CI via percentile method
+    lower = np.percentile(boots, 2.5)
+    upper = np.percentile(boots, 97.5)
+    return pt, lower, upper, boots.size
+
+def _align_histories(hist_list, key):
+    """
+    Pad variable-length history arrays to uniform length with NaNs.
+    
+    Args:
+        hist_list: List of history dicts
+        key: Key to extract from each history
     
     Returns:
-    Path to output FASTA file
+        np.ndarray: NaN-padded 2D array (n_histories x max_length)
+        Empty array (0,0) if input is empty
     """
+    # Return empty 2D array when no histories
+    if not hist_list:
+        return np.empty((0, 0), dtype=float)
     
-    # Build command
-    cmd = [
-        "cd-hit-est",
-        "-i", input_fasta,
-        "-o", f"{output_prefix}.fasta",
-        "-c", str(c),
-        "-n", str(n),
-        "-M", str(M),
-        "-T", str(T),
-        "-G", str(G),
-        "-d", "0", 
-    ]
-
-    # Setup logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(f"\nExecuting CD-HIT-EST command: {' '.join(cmd)}")
+    arrays = []
+    for h in hist_list:
+        # Safely convert missing entries to empty 1-D arrays
+        arr = np.array(h.get(key, []), dtype=float)
+        arrays.append(arr)
     
-    # Add extra parameter
-    cmd.extend(["-g", "1"])
-    
-    # Run CD-HIT
-    try:
-        result = subprocess.run(
-            cmd, 
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Check output file
-        output_file = f"{output_prefix}.fasta"
-        if not os.path.exists(output_file):
-            logger.error(f"Output file not created: {output_file}")
-            raise RuntimeError("CD-HIT failed to generate output file")
-        
-        # Count results
-        input_count = sum(1 for _ in open(input_fasta) if _.startswith(">"))
-        output_count = sum(1 for _ in open(output_file) if _.startswith(">"))
-        reduction = (1 - output_count/input_count) * 100
-        logger.info(f"Redundancy removal completed! Input sequences: {input_count}, Output sequences: {output_count}, Redundancy: {reduction:.1f}%")
-        
-        return output_file
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"CD-HIT execution failed, exit code: {e.returncode}")
-        logger.error(f"Error message:\n{e.stderr}")
-        raise RuntimeError(f"CD-HIT execution failed: {e.stderr}")
+    # Determine maximum length among arrays (0 if all arrays empty)
+    max_len = max((a.shape[0] for a in arrays), default=0)
 
-def stratified_split_fasta(input_fasta, trainval_output, test_output, random_seed=SEED, test_ratio=0.2, label_type=None):
-    """
-    Performs stratified sampling by label to split data into training/validation and test sets.
-    label_type: Type of label to extract from the description, either 'wb' or 'elisa'
-    """
-    rng = random.Random(random_seed)
-    np.random.seed(random_seed)
-
-    # Read FASTA file using Biopython and group sequences by label
-    mrna_sequences = defaultdict(list)
-    for record in SeqIO.parse(input_fasta, "fasta"):
-        label = 'unknown'
-        # Extract label (e.g., mRNA-033|0|1) - first part is wb label, second is elisa label
-        if '|' in record.description and label_type is not None:
-            parts = record.description.split('|')
-            if label_type == 'wb':
-                label = parts[1].strip() if len(parts) >= 2 else 'unknown'
-                # print(record.description, label)
-            elif label_type == 'elisa':
-                label = parts[2].strip() if len(parts) >= 3 else 'unknown'
-                # print(record.description, label)
-            
-        # Store sequence ID and content
-        mrna_sequences[label].append((record.description, str(record.seq)))
-
-    # Print counts per label
-    print("Count statistics per label:")
-    for rna_label, sequences in mrna_sequences.items():
-        print(f"{rna_label}: {len(sequences)}")
-
-   # Perform stratified sampling by label to split into train/val and test sets
-    trainval_seqs = []
-    test_seqs = []
-    trainval_counts = defaultdict(int)
-    test_counts = defaultdict(int)
-    
-    for rna_label, sequences in mrna_sequences.items():
-        # Shuffle sequences for the current label
-        rng.shuffle(sequences)
-        # Calculate test set size
-        test_size = max(1, int(len(sequences) * test_ratio))  # Ensure at least one sample per class in test set
-        # Split into test set and train/val set
-        test_set = sequences[:test_size]
-        trainval_set = sequences[test_size:]
-        # Add to global sets
-        test_seqs.extend(test_set)
-        trainval_seqs.extend(trainval_set)
-        # Record counts
-        test_counts[rna_label] = len(test_set)
-        trainval_counts[rna_label] = len(trainval_set)
-
-    # Shuffle the global sets
-    rng.shuffle(trainval_seqs)
-    rng.shuffle(test_seqs)
-    
-    # Write train/val set file (no extra newlines)
-    write_fasta_file(trainval_seqs, trainval_output)
-    write_fasta_file(test_seqs, test_output)  
-    
-    # Report label counts in train/val and test sets
-    print("Label counts in training/validation set:")
-    for rna_label, count in trainval_counts.items():
-        print(f"{rna_label}: {count}")
-
-    print("Label counts in test set:")
-    for rna_label, count in test_counts.items():
-        print(f"{rna_label}: {count}")
-
-def write_fasta_file(records, filename):
-    with open(filename, 'w') as f:
-        for desc, seq in records:
-            f.write(f">{desc}\n{seq}\n")
-
-
-if __name__ == "__main__":
-
-    # Path to the original finetune data
-    original_excel_path = "../../data/raw/finetune/525条微调序列20251027.xlsx"
-    # Output path for the preprocessed DataFrame  
-    preprocessed_dataframe_output_path = "../../data/preprocessed/finetune/finetune_data.csv"
-    # Output FASTA file path for CD-HIT redundancy removal
-    fasta_file_path_for_CDHIT = "../../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta"
-    # Output path for CD-HIT redundancy removal results
-    cdhit_output_path = "../../data/preprocessed/finetune/remove_redundancy"
-    # Path to the reference sequence (wild-type) for alignment
-    reference_sequence_path = "../../data/raw/finetune/mRNA_045_WT.fasta"
-    # Output path for sequence alignment
-    alignment_output_path = "../../data/preprocessed/finetune/aligned_sequences.fasta"
-    # Directory for storing WB label-based dataset splits
-    wb_splits_dir = '../../data/preprocessed/finetune/wb_splits/'
-    os.makedirs(wb_splits_dir, exist_ok=True)
-    # Directory for storing ELISA label-based dataset splits
-    elisa_splits_dir = '../../data/preprocessed/finetune/elisa_splits/'
-    os.makedirs(elisa_splits_dir, exist_ok=True)
- 
-
-    # 1. Read original excel file
-    df = pd.read_excel(original_excel_path)
-    # print(df.head())
-
-    # 2. Remove wild-type sequence rows
-    # print(len(df))
-    df = df[df["ID"] != "VZV-P01"]
-    # print(len(df))
-
-    # 3. Check for invalid characters
-    check_sequence_characters(df)
-    # All sequences contain only AUGC characters.
-
-    # 4. Generate columns of sequence length, wb label, elisa label, and new IDs with labels
-    result_df = process_dataframe(df, wb_thrd=1, elisa_thrd=500)
-    # print(result_df.head())
-    # Label_wb positive/negative sample count ratio:
-    # Positive(1):Negative(0) = 259 : 265
-    # Label_elisa positive/negative sample count ratio:
-    # Positive(1):Negative(0) = 259 : 265
-    result_df.to_csv(preprocessed_dataframe_output_path, index=False)
-
-    # Write to FASTA file
-    write_fasta(result_df, fasta_file_path_for_CDHIT)
-
-    # 5. Remove global sequence redundancy
-    start_time = time.time() 
-    cdhit_output = run_cdhit_est(
-        input_fasta = fasta_file_path_for_CDHIT,   
-        output_prefix = cdhit_output_path,
-        c = 1.0,
-        n = 5, 
-        M = 64000, 
-        T = 32, 
-        G = 1
-    )
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    time_delta = timedelta(seconds=elapsed_time)
-    print(f"CD-HIT-EST redundancy removal time: {time_delta}")
-    # Fasta file successfully written to ../../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta
-    # INFO:
-    # Executing CD-HIT-EST command: cd-hit-est -i ../../data/preprocessed/finetune/finetune_seqs_4cdhit.fasta -o ../../data/preprocessed/finetune/remove_redundancy.fasta -c 1.0 -n 5 -M 64000 -T 32 -G 1 -d 0:Redundancy removal completed! Input sequences: 524, Output sequences: 340, Redundancy: 35.1%
-    # CD-HIT-EST redundancy removal time: 0:00:00.308373
-
-    # 6. Align wild-type sequences to wild-type sequence
-    run_mafft_and_write(
-        wt_seq = reference_sequence_path,
-        mutant_seqs = cdhit_output_path + '.fasta',
-        out_fasta = alignment_output_path,
-        mafft_exe = "mafft",
-        mafft_args = ["--auto", "--thread", "-1"],
-        # mafft_args=["--localpair", "--maxiterate", "1000", "--thread", "-1"]
-        include_wt_in_output=False
-    )
-    # Verify alignment results by checking sequence lengths
-    validate_alignment(alignment_output_path)
-
-    # 7. Split into training and validation sets​​ by WB label
-    print('\n==============')
-    stratified_split_fasta(
-        input_fasta = alignment_output_path,
-        trainval_output = os.path.join(wb_splits_dir, 'WB_finetune_trainval_set.fasta'),
-        test_output = os.path.join(wb_splits_dir, 'WB_finetune_test_set.fasta'),
-        random_seed = SEED,
-        test_ratio = 0.2,  
-        label_type = 'wb'
-    )
-    # ==============
-    # Count statistics per label:
-    # 0: 240
-    # 1: 260
-    # Label counts in training/validation set:
-    # 0: 192
-    # 1: 208
-    # Label counts in test set:
-    # 0: 48
-    # 1: 52
-
-    # Split into training and validation sets​​ by ELISA label
-    print('\n==============')
-    stratified_split_fasta(
-        input_fasta = alignment_output_path,
-        trainval_output = os.path.join(elisa_splits_dir, 'ELISA_finetune_trainval_set.fasta'),
-        test_output = os.path.join(elisa_splits_dir, 'ELISA_finetune_test_set.fasta'),
-        random_seed=SEED,
-        test_ratio=0.2,   
-        label_type='elisa'
-    )
-    # ==============
-    # Count statistics per label:
-    # 0: 232
-    # 1: 268
-    # Label counts in training/validation set:
-    # 0: 186
-    # 1: 215
-    # Label counts in test set:
-    # 0: 46
-    # 1: 53
-    
- 
+    # Create output array filled with NaN and copy per-row values
+    out = np.full((len(arrays), max_len), np.nan, dtype=float)
+    for i, a in enumerate(arrays):
+        out[i, :a.shape[0]] = a
+    return out

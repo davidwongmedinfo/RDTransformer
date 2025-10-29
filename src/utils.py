@@ -3,6 +3,136 @@ import sys
 import json
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
+from torch.utils.data import Dataset
+from Bio import SeqIO
+from sklearn.preprocessing import LabelEncoder
+import torch
+
+
+class SequenceDataset(Dataset):
+    """
+    A Dataset that reads sequences from a FASTA file and converts them to k-mer indices.
+
+    Assumptions:
+    - FASTA description line format: ">sequence_id|wb_label|elisa_label"
+    - When used with is_train=False, a pre-built kmer_to_idx dict must be supplied so vocabulary is shared with pretraining or fulltraining.
+    """
+    def __init__(self, fasta_file, kmer_size=3, max_length=2048, is_train=True, kmer_to_idx=None, label_encoder=None, compute_class_weights=False, reference_sequence=None, label_type=None):
+        self.kmer_size = kmer_size
+        self.max_length = max_length
+        self.sequences = []
+        self.labels = []
+        self.ids = []  
+        self.compute_class_weights = compute_class_weights
+        self.class_weights = None
+        self.gap_token = '-'
+        
+        # Read FASTA and extract sequence, label and id
+        for record in SeqIO.parse(fasta_file, "fasta"):
+            seq = str(record.seq)
+            # Description format: "sequence_id|wb_label|elisa_label"
+            parts = record.description.split('|')
+            seq_id = parts[0].strip()
+            lt = label_type if label_type is not None else 'wb'
+            if lt == 'wb':
+                if len(parts) < 2:
+                    raise ValueError(f"FASTA description missing wb label: {record.description}")
+                label = parts[1].strip()
+            elif lt == 'elisa':
+                # Guard missing third field
+                if len(parts) < 3:
+                    raise ValueError(f"FASTA description missing elisa label: {record.description}")
+                label = parts[2].strip()
+            else:
+                raise ValueError(f"Invalid label type: '{lt}'. Must be 'wb' or 'elisa'")
+
+            self.sequences.append(seq)
+            self.labels.append(label)
+            self.ids.append(seq_id)
+
+        # Fit or use provided LabelEncoder
+        if label_encoder is None:
+            self.label_encoder = LabelEncoder()
+            self.labels = self.label_encoder.fit_transform(self.labels)
+        else:
+            self.label_encoder = label_encoder
+            self.labels = self.label_encoder.transform(self.labels)
+
+        # Compute class weights for training set if requested (optional)
+        if compute_class_weights:  
+            self.class_weights = self._compute_class_weights()
+        
+        # Build k-mer vocabulary if training; otherwise use provided mapping
+        if is_train:
+            self.build_vocab()
+        else:
+            if kmer_to_idx is None:
+                raise ValueError("kmer_to_idx must be provided for validation/test sets")
+            self.kmer_to_idx = kmer_to_idx
+            self.vocab_size = len(kmer_to_idx) + 1  # +1 for padding index 0
+        
+        # Precompute k-mer index sequences
+        self.kmer_indices = [self.sequence_to_kmers(seq) for seq in self.sequences]
+
+        # Prepare reference sequence indices (optional)
+        if reference_sequence:
+            self.reference_indices = self.sequence_to_kmers(reference_sequence)
+    
+    def get_reference_indices(self):
+        """Return reference sequence k-mer index list if provided, else None."""
+        return getattr(self, "reference_indices", None)
+
+    def _compute_class_weights(self):
+        """Compute balanced class weights and return dict mapping class_index -> weight."""
+        unique_classes = np.unique(self.labels)
+        weights = compute_class_weight('balanced', classes=unique_classes, y=self.labels)
+        class_weights = {cls: weight for cls, weight in zip(unique_classes, weights)}
+        return class_weights
+    
+    def build_vocab(self):
+        """Build k-mer vocabulary from training sequences. Reserve index 0 for padding."""
+        all_kmers = []
+        for seq in self.sequences:
+            kmers = self.extract_kmers(seq)
+            all_kmers.extend(kmers)
+        
+        kmer_counter = collections.Counter(all_kmers)
+        sorted_kmers = sorted(kmer_counter.items(), key=lambda x: x[1], reverse=True)
+        # Indices start at 1; 0 is reserved for padding
+        self.kmer_to_idx = {kmer: idx+1 for idx, (kmer, _) in enumerate(sorted_kmers)}  # index 0 reserved for padding
+        self.vocab_size = len(self.kmer_to_idx) + 1  # +1 for padding index 0
+    
+    def extract_kmers(self, sequence):
+        """Return overlapping k-mers from a raw sequence string."""
+        kmers = []
+        for i in range(len(sequence) - self.kmer_size + 1):
+            kmer = sequence[i:i+self.kmer_size]
+            kmers.append(kmer)
+        return kmers
+    
+    def sequence_to_kmers(self, sequence):
+        """Convert sequence to fixed-length k-mer index list (padding or truncation)."""
+        kmers = self.extract_kmers(sequence)
+        indices = []
+        for kmer in kmers:
+            # Treat any k-mer containing gap_token as padding (skip)
+            if self.gap_token is not None and self.gap_token in kmer:
+                indices.append(0)   
+            else:
+                indices.append(self.kmer_to_idx.get(kmer, 0))
+        # Padding or truncation to max_length
+        if len(indices) > self.max_length:
+            indices = indices[:self.max_length]
+        else:
+            indices += [0] * (self.max_length - len(indices))
+        return indices
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        """Return (kmer_index_tensor, label_tensor, id_str)."""
+        return torch.tensor(self.kmer_indices[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long), self.ids[idx]
 
 def validate_and_normalize_config(config, yaml_cfg=None):
     """

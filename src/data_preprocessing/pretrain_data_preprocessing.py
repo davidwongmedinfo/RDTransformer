@@ -243,7 +243,7 @@ def run_cdhit_est(input_fasta, output_prefix, c, n, M=16000, T=16, G=1):
 
 def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=42, test_ratio=0.1):
     """
-    Performs stratified sampling by RNA type to split into training and test sets.
+    Performs stratified sampling by RNA type to split into train and test sets.
     """
     random.seed(random_seed)
     
@@ -265,7 +265,7 @@ def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=4
     for rna_type, sequences in rna_sequences.items():
         print(f"{rna_type}: {len(sequences)}")
     
-    # Stratified sampling by category to split into training and test sets
+    # Stratified sampling by category to split into train and test sets
     train_seqs = []
     test_seqs = []
     train_counts = defaultdict(int)
@@ -278,7 +278,7 @@ def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=4
         # Calculate test set size (ensure minimum representation)
         test_size = max(1, int(len(sequences) * test_ratio))  
         
-        # Split into training set and test set
+        # Split into train set and test set
         test_set = sequences[:test_size]
         train_set = sequences[test_size:]
         
@@ -290,7 +290,7 @@ def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=4
         train_counts[rna_type] = len(train_set)
         test_counts[rna_type] = len(test_set)
     
-    # Write training set file 
+    # Write train set file 
     with open(train_output, 'w') as f:
         for seq_id, sequence in train_seqs:
             f.write(f">{seq_id}\n")
@@ -303,8 +303,8 @@ def stratified_split_fasta(input_fasta, train_output, test_output, random_seed=4
             f.write(f"{sequence}\n")   
     
     # Report stratified sampling results
-    print(f"\nTraining and test set split ratio: {1-test_ratio}:{test_ratio}")
-    print("\nCounts of each RNA type in training set:")
+    print(f"\nTrain and test set split ratio: {1-test_ratio}:{test_ratio}")
+    print("\nCounts of each RNA type in train set:")
     for rna_type, count in train_counts.items():
         print(f"{rna_type}: {count}")
     
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     # INFO:CD-HIT-EST:Redundancy removal completed! Input sequences: 49048, Output sequences: 38712, Redundancy: 21.1%
     # CD-HIT-EST redundancy removal time: 0:05:08.559344
 
-    # 7. Split into training and validation sets​​  
+    # 7. Split into train and validation sets​​  
     stats = stratified_split_fasta(
         input_fasta = cdhit_output_path + '.fasta',
         train_output = train_output_path,
@@ -385,29 +385,29 @@ if __name__ == "__main__":
         random_seed = SEED,
         test_ratio = 0.1   
     )
-# Counts of each RNA type:
-# lncRNA: 7910
-# snRNA: 7944
-# snoRNA: 7727
-# tRNA: 7120
-# rRNA: 4478
-# miRNA: 3533
+    # Counts of each RNA type:
+    # lncRNA: 7910
+    # snRNA: 7944
+    # snoRNA: 7727
+    # tRNA: 7120
+    # rRNA: 4478
+    # miRNA: 3533
 
-# Training and test set split ratio: 0.9:0.1
+    # Train and test set split ratio: 0.9:0.1
 
-# Counts of each RNA type in training set:
-# lncRNA: 7119
-# snRNA: 7150
-# snoRNA: 6955
-# tRNA: 6408
-# rRNA: 4031
-# miRNA: 3180
+    # Counts of each RNA type in train set:
+    # lncRNA: 7119
+    # snRNA: 7150
+    # snoRNA: 6955
+    # tRNA: 6408
+    # rRNA: 4031
+    # miRNA: 3180
 
-# Counts of each RNA type in test set:
-# lncRNA: 791
-# snRNA: 794
-# snoRNA: 772
-# tRNA: 712
-# rRNA: 447
-# miRNA: 353
+    # Counts of each RNA type in test set:
+    # lncRNA: 791
+    # snRNA: 794
+    # snoRNA: 772
+    # tRNA: 712
+    # rRNA: 447
+    # miRNA: 353
 

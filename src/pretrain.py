@@ -191,7 +191,7 @@ class SequenceDataset(Dataset):
 # -----------------------------
 # Training loop  
 # -----------------------------
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, config, class_names=None):
+def train_model(model, train_loader, val_loader, criterion_train, criterion_val, optimizer, config, class_names=None):
     """
     Train the model and record metrics. Saves best checkpoint (by validation loss), confusion matrix, and training curves.
     """
@@ -201,7 +201,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     os.makedirs(output_folder, exist_ok=True)
 
     # Save config and vocabulary (if available)
-    save_config(config, output_folder, pretrain_config.json)   
+    save_config(config, output_folder, 'pretrain_config.json')   
 
     try:
         kmer_file = os.path.join(output_folder, 'pretrained_kmer_to_idx.json')
@@ -253,19 +253,19 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     print(f"\nWarmup will last for {config.warmup_epochs} epochs ({total_warmup_steps} steps).")
     
     # ==================== Training stage ====================
-    print(f"\nStarting training for {num_epochs} epochs, running on {device}...\n")
+    print(f"\nStarting training for {config.num_epochs} epochs, running on {config.device}...\n")
     
-    for epoch in range(num_epochs):
+    for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0
         train_preds, train_labels, train_probs = [], [], []
         
         for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(config.device), labels.to(config.device)
 
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            loss = criterion_train(outputs, labels)
             loss.backward()
             clip_grad_norm_(model.parameters(), max_norm=config.max_grad_norm)
             optimizer.step()
@@ -327,9 +327,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
         with torch.no_grad():
             for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
+                inputs, labels = inputs.to(config.device), labels.to(config.device)
                 outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                loss = criterion_val(outputs, labels)
                 val_loss += loss.item()             
                 probs = torch.softmax(outputs, dim=1)  
                 _, preds = torch.max(outputs, 1)
@@ -358,13 +358,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_auc_scores.append(val_auc)
         
         # Print epoch summary
-        print(f"Epoch {epoch+1:2d}/{num_epochs} | "
+        print(f"Epoch {epoch+1:2d}/{config.num_epochs} | "
             f"Trn Loss: {epoch_loss:7.4f} | "
             f"Trn F1(w): {train_weighted_f1:7.4f} | "
             f"Trn F1(m): {train_macro_f1:7.4f} | "
             f"Trn AUC: {train_auc:7.4f}")
 
-        print(f"Epoch {epoch+1:2d}/{num_epochs} | "
+        print(f"Epoch {epoch+1:2d}/{config.num_epochs} | "
             f"Val Loss: {val_loss:7.4f} | "
             f"Val F1(w): {val_weighted_f1:7.4f} | "
             f"Val F1(m): {val_macro_f1:7.4f} | "
@@ -394,7 +394,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 best_epoch_labels = val_labels_arr
                 best_epoch_probs = val_probs_arr
 
-                print(f"Epoch {epoch+1}/{num_epochs}: [BEST] Val Loss: {best_val_loss:.4f}")
+                print(f"Epoch {epoch+1}/{config.num_epochs}: [BEST] Val Loss: {best_val_loss:.4f}")
 
             improve = previous_best - val_loss
             if improve > config.early_stopping_delta:
@@ -411,7 +411,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         print("\n")
     
     # Training finished  
-    print(f"\nTraining completed. Best epoch: {best_epoch+1}/{num_epochs}, "
+    print(f"\nTraining completed. Best epoch: {best_epoch+1}/{config.num_epochs}, "
           f"Best Val Loss: {best_val_loss:.4f}")
     
     # Confusion matrix for best epoch 
@@ -551,7 +551,7 @@ def main():
     # Build datasets
     print("\nLoading training data...")
     train_dataset = SequenceDataset(
-        fasta_file="../data/preprocessed/pretraining/splits/pretrain_train_set.fasta", 
+        fasta_file="../data/preprocessed/pretrain/splits/pretrain_train_set.fasta", 
         kmer_size=config.kmer_size, 
         max_length=config.max_seq_length,
         is_train=True,
@@ -567,7 +567,7 @@ def main():
     
     print("Loading validation data...")
     val_dataset = SequenceDataset(
-        fasta_file="../data/preprocessed/pretraining/splits/pretrain_val_set.fasta", 
+        fasta_file="../data/preprocessed/pretrain/splits/pretrain_val_set.fasta", 
         kmer_size=config.kmer_size, 
         max_length=config.max_seq_length,
         is_train=False,
@@ -603,6 +603,7 @@ def main():
         dropout_rate=config.dropout_rate,
         max_length=config.max_seq_length
     ).to(config.device)
+    print(model)
 
     # Print parameter summary
     total = sum(p.numel() for p in model.parameters())
@@ -618,14 +619,16 @@ def main():
     if config.use_class_weights and train_dataset.class_weights is not None:
         weights = [train_dataset.class_weights.get(i, 1.0) for i in range(config.num_classes)]
         weights_tensor = torch.tensor(weights, dtype=torch.float32).to(config.device)
-        criterion = nn.CrossEntropyLoss(weight=weights_tensor)   
+        criterion_train = nn.CrossEntropyLoss(weight=weights_tensor)   
         print("\nUsing weighted CrossEntropyLoss for class imbalance correction")
         print("Class weights applied:")
         for class_idx, weight in enumerate(weights):
             print(f"  Class {class_idx}: {weight:.4f}")
     else:
-        criterion = nn.CrossEntropyLoss()
+        criterion_train = nn.CrossEntropyLoss()
         print("\nUsing standard CrossEntropyLoss (no class weighting applied)")
+    
+    criterion_val = nn.CrossEntropyLoss()
 
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     
@@ -634,10 +637,9 @@ def main():
         model, 
         train_loader, 
         val_loader, 
-        criterion, 
+        criterion_train,
+        criterion_val, 
         optimizer, 
-        config.num_epochs, 
-        config.device,
         config,
         class_names=list(train_dataset.label_encoder.classes_) 
     )

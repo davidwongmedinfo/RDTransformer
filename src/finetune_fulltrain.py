@@ -24,7 +24,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 from Bio import SeqIO
 from models import SinusoidalPositionalEncoding, TransformerEncoderModel_Finetune, Head_SingleLogit
-from utils import validate_and_normalize_config, save_config, safe_index_or_max, expected_calibration_error, bootstrap_ci, _align_histories
+from utils import SequenceDataset, validate_and_normalize_config, save_config, safe_index_or_max, expected_calibration_error, bootstrap_ci, _align_histories
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -61,14 +61,14 @@ REFERENCE_COLOR = 'grey'
 @dataclass
 class Config:
     # Data / preprocessing (must match the pretrained model)
-    kmer_size: int = 3  
+    kmer_size: int = 3  #  
     pretrain_num_classes: int = 6   
     max_seq_length: int = 2048   
     # Model architecture
-    embedding_dim: int = 64  # (must match the pretrained model)
-    num_heads: int = 4  # (must match the pretrained model)
-    num_layers: int = 2  # (must match the pretrained model)
-    hidden_dim: int = 192  # (must match the pretrained model)
+    embedding_dim: int = 64  # must match the pretrained model
+    num_heads: int = 4  # must match the pretrained model
+    num_layers: int = 2  # must match the pretrained model
+    hidden_dim: int = 192  # must match the pretrained model
     dropout_rate: float = 0.2
     hidden_dim_for_binary_classifier: int = 64
     # Training hyperparameters
@@ -95,143 +95,17 @@ class Config:
     # Paths for pretrain checkpoint, kmer vocab and finetune fasta
     pretrained_ckpt_path: str = "pretrain_save_20250923_1727/pretrained_best_model_epoch436.pth"
     pretrained_kmer_json: str = "pretrain_save_20250923_1727/pretrained_kmer_to_idx.json"
-    finetune_combined_fasta: str = "../data/preprocessed/finetuning/wb_splits/WB_finetune_trainval_set.fasta"
+    finetune_combined_fasta: str = "../data/preprocessed/finetune/wb_splits/wb_finetune_trainval_set.fasta"
     reference_fasta: str = "../data/raw/mRNA_045_WT.fasta"
     # Label type
     label: str = "wb"  # indicate wb or elisa
 
 # -----------------------------
-# Dataset
-# -----------------------------
-class SequenceDataset(Dataset):
-    """
-    A Dataset that reads sequences from a FASTA file and converts them to k-mer indices.
-
-    Assumptions:
-    - FASTA description line format: ">sequence_id|wb_label|elisa_label"
-    - When used with is_train=False, a pre-built kmer_to_idx dict must be supplied so vocabulary is shared with pretraining.
-    """
-    def __init__(self, fasta_file, kmer_size=3, max_length=2048, is_train=True, kmer_to_idx=None, label_encoder=None, compute_class_weights=False, reference_sequence=None, label_type=None):
-        self.kmer_size = kmer_size
-        self.max_length = max_length
-        self.sequences = []
-        self.labels = []
-        self.ids = []  
-        self.compute_class_weights = compute_class_weights
-        self.class_weights = None
-        self.gap_token = '-'
-        
-        # Read FASTA and extract sequence, label and id
-        for record in SeqIO.parse(fasta_file, "fasta"):
-            seq = str(record.seq)
-            # Description format: "sequence_id|wb_label|elisa_label"
-            parts = record.description.split('|')
-            seq_id = parts[0].strip()
-            lt = label_type if label_type is not None else getattr(config, 'label', 'wb')
-            if lt == 'wb':
-                label = parts[1].strip()
-            elif lt == 'elisa':
-                # guard missing third field
-                if len(parts) < 3:
-                    raise ValueError(f"FASTA description missing elisa label: {record.description}")
-                label = parts[2].strip()
-            else:
-                raise ValueError(f"Invalid label type: '{lt}'. Must be 'wb' or 'elisa'")
-
-            self.sequences.append(seq)
-            self.labels.append(label)
-            self.ids.append(seq_id)
-
-        # Fit or use provided LabelEncoder
-        if label_encoder is None:
-            self.label_encoder = LabelEncoder()
-            self.labels = self.label_encoder.fit_transform(self.labels)
-        else:
-            self.label_encoder = label_encoder
-            self.labels = self.label_encoder.transform(self.labels)
-
-        # Compute class weights for training set if requested (optional)
-        if compute_class_weights:  
-            self.class_weights = self._compute_class_weights()
-        
-        # Build k-mer vocabulary if training; otherwise use provided mapping
-        if is_train:
-            self.build_vocab()
-        else:
-            if kmer_to_idx is None:
-                raise ValueError("kmer_to_idx must be provided for validation/test sets")
-            self.kmer_to_idx = kmer_to_idx
-            self.vocab_size = len(kmer_to_idx) + 1  # +1 for padding index 0
-        
-        # Precompute k-mer index sequences
-        self.kmer_indices = [self.sequence_to_kmers(seq) for seq in self.sequences]
-
-        # Prepare reference sequence indices (optional)
-        if reference_sequence:
-            self.reference_indices = self.sequence_to_kmers(reference_sequence)
-    
-    def get_reference_indices(self):
-        """Return reference sequence k-mer index list if provided, else None."""
-        return getattr(self, "reference_indices", None)
-
-    def _compute_class_weights(self):
-        """Compute balanced class weights and return dict mapping class_index -> weight."""
-        unique_classes = np.unique(self.labels)
-        weights = compute_class_weight('balanced', classes=unique_classes, y=self.labels)
-        class_weights = {cls: weight for cls, weight in zip(unique_classes, weights)}
-        return class_weights
-    
-    def build_vocab(self):
-        """Build k-mer vocabulary from training sequences. Reserve index 0 for padding."""
-        all_kmers = []
-        for seq in self.sequences:
-            kmers = self.extract_kmers(seq)
-            all_kmers.extend(kmers)
-        
-        kmer_counter = collections.Counter(all_kmers)
-        sorted_kmers = sorted(kmer_counter.items(), key=lambda x: x[1], reverse=True)
-        # Indices start at 1; 0 is reserved for padding
-        self.kmer_to_idx = {kmer: idx+1 for idx, (kmer, _) in enumerate(sorted_kmers)}  # index 0 reserved for padding
-        self.vocab_size = len(self.kmer_to_idx) + 1  # +1 for padding index 0
-    
-    def extract_kmers(self, sequence):
-        """Return overlapping k-mers from a raw sequence string."""
-        kmers = []
-        for i in range(len(sequence) - self.kmer_size + 1):
-            kmer = sequence[i:i+self.kmer_size]
-            kmers.append(kmer)
-        return kmers
-    
-    def sequence_to_kmers(self, sequence):
-        """Convert sequence to fixed-length k-mer index list (padding or truncation)."""
-        kmers = self.extract_kmers(sequence)
-        indices = []
-        for kmer in kmers:
-            # Treat any k-mer containing gap_token as padding (skip)
-            if self.gap_token is not None and self.gap_token in kmer:
-                indices.append(0)   
-            else:
-                indices.append(self.kmer_to_idx.get(kmer, 0))
-        # Padding or truncation to max_length
-        if len(indices) > self.max_length:
-            indices = indices[:self.max_length]
-        else:
-            indices += [0] * (self.max_length - len(indices))
-        return indices
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        """Return (kmer_index_tensor, label_tensor, id_str)."""
-        return torch.tensor(self.kmer_indices[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long), self.ids[idx]
-
-# -----------------------------
 # Training loop
 # ----------------------------- 
-def train_model(model, train_loader, criterion, optimizer, num_epochs, device, config, class_names=None, output_folder=None):
+def train_model(model, train_loader, criterion, optimizer, config, class_names=None, output_folder=None):
     """
-    Train the model on the full training set and record metrics per epoch.
+    Train the model on the fulltrain set and record metrics per epoch.
     - Saves a final checkpoint for held-out testing.
     - Scheduler uses step-level LinearLR warmup followed by CosineAnnealingLR (wrapped in SequentialLR).
     - Metrics recorded: loss, weighted/macro F1, AUROC, AUPRC, Brier, ECE (for debugging purposes).
@@ -239,11 +113,11 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
     # Create output folder with timestamp if not provided
     if output_folder is None:
         current_time = datetime.now().strftime('%Y%m%d_%H%M')
-        output_folder = f"full-training_save_{current_time}"
+        output_folder = f"{config.label}_fulltrain_save_{current_time}"
     os.makedirs(output_folder, exist_ok=True)
 
     # Save config snapshot
-    save_config(config, output_folder, 'full-training_config.json') 
+    save_config(config, output_folder, 'fulltrain_config.json') 
 
     # Bookkeeping
     train_losses, lrs = [], []
@@ -292,16 +166,16 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
     print(f"\nWarmup will last for {config.warmup_epochs} epochs ({total_warmup_steps} steps).")
  
     # ==================== Training stage ====================
-    print(f"Starting training for {num_epochs} epochs, running on {device}...")
+    print(f"Starting training for {config.num_epochs} epochs, running on {config.device}...")
     
-    for epoch in range(num_epochs):
+    for epoch in range(config.num_epochs):
         model.train()
 
         running_loss = 0.0
         train_preds, train_labels, train_probs = [], [], []
         
         for inputs, labels, ids in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(config.device), labels.to(config.device)
             
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -370,7 +244,7 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
         try:
             train_auc = float(roc_auc_score(train_labels_arr, pos_prob_train))
         except Exception as e:
-            print(f"Error calculating training AUC: {e}")
+            print(f"Train AUC error: {e}")
             train_auc = 0.0
         
         try:
@@ -409,7 +283,7 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
         train_macro_f1_scores.append(train_macro_f1)
 
         # Print epoch summary
-        print(f"\nEpoch {epoch+1:2d}/{num_epochs} | "
+        print(f"\nEpoch {epoch+1:2d}/{config.num_epochs} | "
             f"Trn Loss: {epoch_loss:7.4f} | "
             f"Trn F1(w): {train_weighted_f1:7.4f} | "
             f"Trn F1(m): {train_macro_f1:7.4f} | "
@@ -431,12 +305,12 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
                     'scheduler_state_dict': scheduler.state_dict() if 'scheduler' in locals() else None,
                     'best_train_auc': best_train_auc
                 }, best_model_path)
-                print(f"Epoch {epoch+1}/{num_epochs}: [BEST_BY_TRAIN] Train AUROC: {best_train_auc:.4f}")
+                print(f"Epoch {epoch+1}/{config.num_epochs}: [BEST_BY_TRAIN] Train AUROC: {best_train_auc:.4f}")
 
     # Training finished  
     final_model_path = os.path.join(output_folder, 'final_model.pth')
     torch.save({
-        'epoch': num_epochs - 1,
+        'epoch': config.num_epochs - 1,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if 'scheduler' in locals() else None,
@@ -581,9 +455,9 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, device, c
 
 
 # -----------------------------
-# Main full-training  
+# Main fulltrain  
 # ----------------------------
-def main_full_train():
+def main_fulltrain(config):
     """
     Run full-data fine-tuning using a pretrained checkpoint and pretrained k-mer vocabulary.
     - Loads reference sequence, pretrained vocab and checkpoint.
@@ -619,7 +493,7 @@ def main_full_train():
     except Exception as e:
         raise RuntimeError(f"Failed loading pretrained_kmer_json {pretrained_kmer_json}: {e}")
 
-    # Build full dataset for full-training (use pretrained kmer_to_idx)
+    # Build full dataset for fulltrain (use pretrained kmer_to_idx)
     full_dataset = SequenceDataset(
         fasta_file=finetune_combined_fasta,
         kmer_size=config.kmer_size,
@@ -631,7 +505,7 @@ def main_full_train():
         reference_sequence=wt_seq,
         label_type=config.label
     )
-    print("Loaded full training dataset.")
+    print("Loaded fulltrain dataset.")
     n_samples = len(full_dataset)
     print(f"Full dataset size: {n_samples}")
     print("Label classes (finetune):", full_dataset.label_encoder.classes_)
@@ -700,7 +574,7 @@ def main_full_train():
     # Print label mapping (index -> original label string)
     print("Label mapping (index -> class_name):", dict(enumerate(full_dataset.label_encoder.classes_)))
 
-    # Count positives/negatives in full training set  
+    # Count positives/negatives in fulltrain set  
     labels_all = np.array(full_dataset.labels)
     n_pos = int((labels_all == 1).sum())
     n_neg = int((labels_all == 0).sum())
@@ -709,7 +583,7 @@ def main_full_train():
     # Loss: optionally use pos_weight to balance BCE
     if config.use_class_weights:
         if n_pos == 0:
-            raise ValueError("No positive samples in training fold; can't compute pos_weight.")
+            raise ValueError("No positive samples in train fold; can't compute pos_weight.")
         pos_weight_scalar = float(n_neg) / float(n_pos)
         pos_weight_tensor = torch.tensor(pos_weight_scalar, dtype=torch.float32, device=config.device)   
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
@@ -728,7 +602,7 @@ def main_full_train():
  
     # Base output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-    out_folder = f"fulltrain_{timestamp}"
+    out_folder = f"{config.label}_fulltrain_save_{timestamp}"
     os.makedirs(out_folder, exist_ok=True)
 
     # Save label encoder classes
@@ -755,16 +629,14 @@ def main_full_train():
     except Exception as e:
         print("Warning: failed to save k-mer vocab:", e)
         
-    # Run full-training 
+    # Run fulltrain 
     history = train_model(
         model,
         train_loader,
         criterion,
         optimizer,
-        config.num_epochs,
-        config.device,
         config,
-        class_names=list(full_dataset.label_encoder.classes_),
+        # class_names=list(full_dataset.label_encoder.classes_),
         output_folder=out_folder
     )
     print("Training on full dataset finished. Outputs saved to:", out_folder)
@@ -886,4 +758,4 @@ if __name__ == "__main__":
     print(f"Config source: {src}; overrides: {args.override}")
     print("Final config (after YAML/overrides):", config, "\n")
 
-    main_full_train()
+    main_fulltrain(config)

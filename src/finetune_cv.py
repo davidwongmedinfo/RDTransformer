@@ -24,7 +24,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 from Bio import SeqIO
 from models import SinusoidalPositionalEncoding, TransformerEncoderModel_Finetune, Head_SingleLogit
-from utils import validate_and_normalize_config, save_config, safe_index_or_max, expected_calibration_error, bootstrap_ci, _align_histories
+from utils import SequenceDataset, validate_and_normalize_config, save_config, safe_index_or_max, expected_calibration_error, bootstrap_ci, _align_histories
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -61,14 +61,14 @@ REFERENCE_COLOR = 'grey'
 @dataclass
 class Config:
     # Data / preprocessing (must match the pretrained model)
-    kmer_size: int = 3  
+    kmer_size: int = 3  #  
     pretrain_num_classes: int = 6   
     max_seq_length: int = 2048   
     # Model architecture
-    embedding_dim: int = 64  # (must match the pretrained model)
-    num_heads: int = 4  # (must match the pretrained model)
-    num_layers: int = 2  # (must match the pretrained model)
-    hidden_dim: int = 192  # (must match the pretrained model)
+    embedding_dim: int = 64  # must match the pretrained model
+    num_heads: int = 4  # must match the pretrained model
+    num_layers: int = 2  # must match the pretrained model
+    hidden_dim: int = 192  # must match the pretrained model
     dropout_rate: float = 0.2
     hidden_dim_for_binary_classifier: int = 64
     # Training hyperparameters
@@ -95,141 +95,15 @@ class Config:
     # Paths for pretrain checkpoint, kmer vocab and finetune fasta
     pretrained_ckpt_path: str = "pretrain_save_20250923_1727/pretrained_best_model_epoch436.pth"
     pretrained_kmer_json: str = "pretrain_save_20250923_1727/pretrained_kmer_to_idx.json"
-    finetune_combined_fasta: str = "../data/preprocessed/finetuning/wb_splits/WB_finetune_trainval_set.fasta"
+    finetune_combined_fasta: str = "../data/preprocessed/finetune/wb_splits/wb_finetune_trainval_set.fasta"
     reference_fasta: str = "../data/raw/mRNA_045_WT.fasta"
     # Label type
     label: str = "wb"  # indicate wb or elisa
 
 # -----------------------------
-# Dataset
-# -----------------------------
-class SequenceDataset(Dataset):
-    """
-    A Dataset that reads sequences from a FASTA file and converts them to k-mer indices.
-
-    Assumptions:
-    - FASTA description line format: ">sequence_id|wb_label|elisa_label"
-    - When used with is_train=False, a pre-built kmer_to_idx dict must be supplied so vocabulary is shared with pretraining.
-    """
-    def __init__(self, fasta_file, kmer_size=3, max_length=2048, is_train=True, kmer_to_idx=None, label_encoder=None, compute_class_weights=False, reference_sequence=None, label_type=None):
-        self.kmer_size = kmer_size
-        self.max_length = max_length
-        self.sequences = []
-        self.labels = []
-        self.ids = []  
-        self.compute_class_weights = compute_class_weights
-        self.class_weights = None
-        self.gap_token = '-'
-        
-        # Read FASTA and extract sequence, label and id
-        for record in SeqIO.parse(fasta_file, "fasta"):
-            seq = str(record.seq)
-            # Description format: "sequence_id|wb_label|elisa_label"
-            parts = record.description.split('|')
-            seq_id = parts[0].strip()
-            lt = label_type if label_type is not None else getattr(config, 'label', 'wb')
-            if lt == 'wb':
-                label = parts[1].strip()
-            elif lt == 'elisa':
-                # guard missing third field
-                if len(parts) < 3:
-                    raise ValueError(f"FASTA description missing elisa label: {record.description}")
-                label = parts[2].strip()
-            else:
-                raise ValueError(f"Invalid label type: '{lt}'. Must be 'wb' or 'elisa'")
-
-            self.sequences.append(seq)
-            self.labels.append(label)
-            self.ids.append(seq_id)
-
-        # Fit or use provided LabelEncoder
-        if label_encoder is None:
-            self.label_encoder = LabelEncoder()
-            self.labels = self.label_encoder.fit_transform(self.labels)
-        else:
-            self.label_encoder = label_encoder
-            self.labels = self.label_encoder.transform(self.labels)
-
-        # Compute class weights for training set if requested (optional)
-        if compute_class_weights:  
-            self.class_weights = self._compute_class_weights()
-        
-        # Build k-mer vocabulary if training; otherwise use provided mapping
-        if is_train:
-            self.build_vocab()
-        else:
-            if kmer_to_idx is None:
-                raise ValueError("kmer_to_idx must be provided for validation/test sets")
-            self.kmer_to_idx = kmer_to_idx
-            self.vocab_size = len(kmer_to_idx) + 1  # +1 for padding index 0
-        
-        # Precompute k-mer index sequences
-        self.kmer_indices = [self.sequence_to_kmers(seq) for seq in self.sequences]
-
-        # Prepare reference sequence indices (optional)
-        if reference_sequence:
-            self.reference_indices = self.sequence_to_kmers(reference_sequence)
-    
-    def get_reference_indices(self):
-        """Return reference sequence k-mer index list if provided, else None."""
-        return getattr(self, "reference_indices", None)
-
-    def _compute_class_weights(self):
-        """Compute balanced class weights and return dict mapping class_index -> weight."""
-        unique_classes = np.unique(self.labels)
-        weights = compute_class_weight('balanced', classes=unique_classes, y=self.labels)
-        class_weights = {cls: weight for cls, weight in zip(unique_classes, weights)}
-        return class_weights
-    
-    def build_vocab(self):
-        """Build k-mer vocabulary from training sequences. Reserve index 0 for padding."""
-        all_kmers = []
-        for seq in self.sequences:
-            kmers = self.extract_kmers(seq)
-            all_kmers.extend(kmers)
-        
-        kmer_counter = collections.Counter(all_kmers)
-        sorted_kmers = sorted(kmer_counter.items(), key=lambda x: x[1], reverse=True)
-        # Indices start at 1; 0 is reserved for padding
-        self.kmer_to_idx = {kmer: idx+1 for idx, (kmer, _) in enumerate(sorted_kmers)}  # index 0 reserved for padding
-        self.vocab_size = len(self.kmer_to_idx) + 1  # +1 for padding index 0
-    
-    def extract_kmers(self, sequence):
-        """Return overlapping k-mers from a raw sequence string."""
-        kmers = []
-        for i in range(len(sequence) - self.kmer_size + 1):
-            kmer = sequence[i:i+self.kmer_size]
-            kmers.append(kmer)
-        return kmers
-    
-    def sequence_to_kmers(self, sequence):
-        """Convert sequence to fixed-length k-mer index list (padding or truncation)."""
-        kmers = self.extract_kmers(sequence)
-        indices = []
-        for kmer in kmers:
-            # Treat any k-mer containing gap_token as padding (skip)
-            if self.gap_token is not None and self.gap_token in kmer:
-                indices.append(0)   
-            else:
-                indices.append(self.kmer_to_idx.get(kmer, 0))
-        # Padding or truncation to max_length
-        if len(indices) > self.max_length:
-            indices = indices[:self.max_length]
-        else:
-            indices += [0] * (self.max_length - len(indices))
-        return indices
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        """Return (kmer_index_tensor, label_tensor, id_str)."""
-        return torch.tensor(self.kmer_indices[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long), self.ids[idx]
-
-# -----------------------------
 # Training loop
 # -----------------------------
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, config, class_names=None, output_folder=None):
+def train_model(model, train_loader, val_loader, criterion_train, criterion_val, optimizer, config, class_names=None, output_folder=None):
     """
     Train the model and record metrics per epoch.
     - Saves best checkpoint (by validation AUROC), saves OOF CSV for best epoch, and generates diagnostic plots.
@@ -239,11 +113,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     # Create output folder with timestamp if not provided
     if output_folder is None:
         current_time = datetime.now().strftime('%Y%m%d_%H%M')
-        output_folder = f"finetune_save_{current_time}"
+        output_folder = f"{config.label}_cv_save_{current_time}"
     os.makedirs(output_folder, exist_ok=True)
 
     # Save config snapshot
-    save_config(config, output_folder, 'finetune_config.json')   
+    save_config(config, output_folder, 'cv_config.json')   
 
     # Bookkeeping
     best_val_auc = -np.inf
@@ -301,22 +175,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     print(f"\nWarmup will last for {config.warmup_epochs} epochs ({total_warmup_steps} steps).")
     
     # ==================== Training stage ====================
-    print(f"Starting training for {num_epochs} epochs, running on {device}...")
+    print(f"Starting training for {config.num_epochs} epochs, running on {config.device}...")
     
-    for epoch in range(num_epochs):
+    for epoch in range(config.num_epochs):
         model.train()
 
         running_loss = 0.0
         train_preds, train_labels, train_probs = [], [], []
         
         for inputs, labels, ids in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(config.device), labels.to(config.device)
             
             optimizer.zero_grad()
             outputs = model(inputs)
             
             # Using BCEWithLogitsLoss: outputs expected to be single-logit per sample for binary setup
-            loss = criterion(outputs, labels.float().unsqueeze(1))  # BCEwithloss
+            loss = criterion_train(outputs, labels.float().unsqueeze(1))  # BCEwithloss
             loss.backward()
 
             # Gradient clipping only on trainable params
@@ -379,7 +253,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         try:
             train_auc = float(roc_auc_score(train_labels_arr, pos_prob_train))
         except Exception as e:
-            print(f"Error calculating training AUC: {e}")
+            print(f"Train AUC error: {e}")
             train_auc = 0.0
         
         try:
@@ -424,9 +298,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
         with torch.no_grad():
             for inputs, labels, ids in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device) 
+                inputs, labels = inputs.to(config.device), labels.to(config.device) 
                 outputs = model(inputs)
-                loss = criterion(outputs, labels.float().unsqueeze(1))  
+                loss = criterion_val(outputs, labels.float().unsqueeze(1))  
                 val_loss += loss.item()
                 
                 probs_pos = torch.sigmoid(outputs).squeeze(1)
@@ -468,7 +342,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             val_brier = 0.0
 
         try:
-            val_ece = expected_calibration_error(val_labels_arr, pos_prob_val, n_bins=8) if pos_prob_val.size>0 else 0.0
+            val_ece = expected_calibration_error(val_labels_arr, pos_prob_val, n_bins=8, strategy='quantile') if pos_prob_val.size>0 else 0.0
         except Exception as e:
             print(f"Val ECE error: {e}")
             val_ece = 0.0
@@ -491,7 +365,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_macro_f1_scores.append(val_macro_f1)
         
         # Print epoch summary
-        print(f"\nEpoch {epoch+1:2d}/{num_epochs} | "
+        print(f"\nEpoch {epoch+1:2d}/{config.num_epochs} | "
             f"Trn Loss: {epoch_loss:7.4f} | "
             f"Trn F1(w): {train_weighted_f1:7.4f} | "
             f"Trn F1(m): {train_macro_f1:7.4f} | "
@@ -500,7 +374,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             f"Trn Brier: {train_brier:7.4f} | "
             f"Trn ECE: {train_ece:.4f} | ")
 
-        print(f"Epoch {epoch+1:2d}/{num_epochs} | "
+        print(f"Epoch {epoch+1:2d}/{config.num_epochs} | "
             f"Val Loss: {val_loss:7.4f} | "
             f"Val F1(w): {val_weighted_f1:7.4f} | "
             f"Val F1(m): {val_macro_f1:7.4f} | "
@@ -527,7 +401,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             best_epoch_probs = val_probs_arr
             best_epoch_ids = list(val_ids)
 
-            print(f"Epoch {epoch+1}/{num_epochs}: [BEST] Val AUROC: {best_val_auc:.4f}")
+            print(f"Epoch {epoch+1}/{config.num_epochs}: [BEST] Val AUROC: {best_val_auc:.4f}")
         else:
             print(f"Epoch {epoch+1}: Val AUROC did not improve (current: {val_auc:.4f}, best: {best_val_auc:.4f})")
 
@@ -535,7 +409,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     if best_epoch is None:
         print(f"\nTraining completed. No best epoch found (best_val_auc={best_val_auc:.4f}).")
     else:
-        print(f"\nTraining completed. Best epoch: {best_epoch+1}/{num_epochs}, Best Val AUROC: {best_val_auc:.4f}")
+        print(f"\nTraining completed. Best epoch: {best_epoch+1}/{config.num_epochs}, Best Val AUROC: {best_val_auc:.4f}")
 
     # Confusion matrix for best epoch (if available)
     if best_epoch_preds is not None and best_epoch_labels is not None and best_epoch_probs is not None:
@@ -796,7 +670,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
 
 # -----------------------------
-# Main fine-tuning
+# Main fine-tuning 
 # -----------------------------
 def main_finetune(config):
     """
@@ -862,7 +736,7 @@ def main_finetune(config):
 
     # Base output directory for all folds
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-    base_out_dir = f"finetune_cv_{timestamp}"
+    base_out_dir = f"{config.label}_cv_save_{timestamp}"
     os.makedirs(base_out_dir, exist_ok=True)
 
     fold_results = []
@@ -952,11 +826,13 @@ def main_finetune(config):
                 raise ValueError("No positive samples in training fold; can't compute pos_weight.")
             pos_weight_scalar = float(n_neg) / float(n_pos)
             pos_weight_tensor = torch.tensor(pos_weight_scalar, dtype=torch.float32, device=config.device)   
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+            criterion_train = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
             print(f"Using BCEWithLogitsLoss with pos_weight = n_neg/n_pos = {pos_weight_scalar:.4f}")
         else:
-            criterion = nn.BCEWithLogitsLoss()
+            criterion_train = nn.BCEWithLogitsLoss()
             print("Using standard BCEWithLogitsLoss (no pos_weight).")
+
+        criterion_val = nn.BCEWithLogitsLoss()
 
         # Optimizer: only update parameters with requires_grad=True
         optimizer = torch.optim.AdamW(
@@ -971,10 +847,9 @@ def main_finetune(config):
             model,
             train_loader,
             val_loader,
-            criterion,
+            criterion_train,
+            criterion_val,
             optimizer,
-            config.num_epochs,
-            config.device,
             config,
             class_names=list(full_dataset.label_encoder.classes_),
             output_folder=fold_out
@@ -986,28 +861,32 @@ def main_finetune(config):
         best_epoch = history.get('best_epoch', None)
         train_aucs = np.array(history.get('train_auroc_scores', []), dtype=float)
         train_auprcs = np.array(history.get('train_auprc_scores', []), dtype=float)
+        train_briers = np.array(history.get('train_brier_scores', []), dtype=float)
         val_auprcs = np.array(history.get('val_auprc_scores', []), dtype=float)
+        val_briers = np.array(history.get('val_brier_scores', []), dtype=float)
 
         best_train_auc = safe_index_or_max(train_aucs, best_epoch)
         best_train_auprc = safe_index_or_max(train_auprcs, best_epoch)
+        best_train_brier = safe_index_or_max(train_briers, best_epoch)
         best_val_auprc = safe_index_or_max(val_auprcs, best_epoch)
+        best_val_brier = safe_index_or_max(val_briers, best_epoch)
 
         fold_results.append({
             'fold': fold_idx,
-            'best_val_auc': best_val_auc,
             'best_train_auc': best_train_auc,
             'best_train_auprc': best_train_auprc,
+            'best_train_brier': best_train_brier,
+            'best_val_auc': best_val_auc,
             'best_val_auprc': best_val_auprc,
+            'best_val_brier': best_val_brier,
             'output_folder': fold_out
         })
 
         # Cleanup to free GPU memory
-        del model, optimizer, criterion
+        del model, optimizer, criterion_train, criterion_val
         torch.cuda.empty_cache()
 
     # Summarize CV results
-    for r in fold_results:
-        print(f"Fold {r['fold']}: Best AUROC = {r['best_val_auc']:.4f} (folder: {r['output_folder']})")
     mean_train_auc = np.mean([r['best_train_auc'] for r in fold_results])
     std_train_auc = np.std([r['best_train_auc'] for r in fold_results])   
     mean_val_auc = np.mean([r['best_val_auc'] for r in fold_results])  
@@ -1016,11 +895,20 @@ def main_finetune(config):
     std_train_auprc = np.std([r['best_train_auprc'] for r in fold_results])  
     mean_val_auprc = np.mean([r['best_val_auprc'] for r in fold_results])  
     std_val_auprc = np.std([r['best_val_auprc'] for r in fold_results])
-    print(f"\n4-fold CV summary:")
+    mean_train_brier = np.mean([r['best_train_brier'] for r in fold_results])
+    std_train_brier = np.std([r['best_train_brier'] for r in fold_results])  
+    mean_val_brier = np.mean([r['best_val_brier'] for r in fold_results])  
+    std_val_brier = np.std([r['best_val_brier'] for r in fold_results])
+
+    print("\n[Summary] Per-fold best-epoch metrics:")
     print(f"Train AUROC: mean = {mean_train_auc:.4f}, std = {std_train_auc:.4f}")
     print(f"Validation AUROC: mean = {mean_val_auc:.4f}, std = {std_val_auc:.4f}")
     print(f"Train AUPRC: mean = {mean_train_auprc:.4f}, std = {std_train_auprc:.4f}")
     print(f"Validation AUPRC: mean = {mean_val_auprc:.4f}, std = {std_val_auprc:.4f}")
+    print(f"Train Brier: mean = {mean_train_brier:.4f}, std = {std_train_brier:.4f}")
+    print(f"Validation Brier: mean = {mean_val_brier:.4f}, std = {std_val_brier:.4f}")
+    for r in fold_results:
+        print(f"Fold {r['fold']}: Best AUROC = {r['best_val_auc']:.4f} (folder: {r['output_folder']})")
     print(f"All fold outputs saved under: {base_out_dir}")
 
     # ----------------------------
@@ -1033,6 +921,7 @@ def main_finetune(config):
     # Keep per-fold OOF counts for debug and sanity checks
     oof_counts = []
 
+    print("\n[Summary] Per-fold OOF performance:")
     for i, h in enumerate(histories, start=1):
         # Each history is expected to include 'oof_true' and 'oof_prob1' for the best epoch of that fold
         oof_true = np.array(h.get('oof_true', []), dtype=float)
@@ -1066,7 +955,7 @@ def main_finetune(config):
         oof_auprc_list.append(auprc)
         oof_brier_list.append(brier)
         oof_counts.append(oof_true.size)
-        print(f"Fold {i}: OOF n={oof_true.size}, AUROC={auc:.4f}, AUPRC={auprc:.4f}, Brier={brier:.4f}")
+        print(f"OOF Fold {i}: n={oof_true.size}, AUROC={auc:.4f}, AUPRC={auprc:.4f}, Brier={brier:.4f}")
 
     # Compute mean/std across folds while ignoring NaNs
     auc_arr = np.array(oof_auc_list, dtype=float)
@@ -1080,7 +969,6 @@ def main_finetune(config):
     mean_brier = np.nanmean(brier_arr) if brier_arr.size>0 else np.nan
     std_brier  = np.nanstd(brier_arr)  if brier_arr.size>0 else np.nan
 
-    print("\nOOF per-fold metrics summary:")
     print(f"AUROC: mean={mean_auc:.4f}, std={std_auc:.4f}")
     print(f"AUPRC: mean={mean_auprc:.4f}, std={std_auprc:.4f}")
     print(f"Brier: mean={mean_brier:.4f}, std={std_brier:.4f}")
@@ -1094,22 +982,23 @@ def main_finetune(config):
     pooled_true = np.concatenate(pooled_true_list) if len(pooled_true_list) > 0 else np.array([])
     pooled_prob = np.concatenate(pooled_prob_list) if len(pooled_prob_list) > 0 else np.array([])
 
-    pooled_auc = pooled_auprc = pooled_brier = np.nan
-    if pooled_true.size>0 and pooled_prob.size>0:
-        try:
-            pooled_auc = float(roc_auc_score(pooled_true, pooled_prob))
-        except Exception as e:
-            print(f"Pooled AUROC error: {e}")
-        try:
-            pooled_auprc = float(average_precision_score(pooled_true, pooled_prob))
-        except Exception as e:
-            print(f"Pooled AUPRC error: {e}")
-        try:
-            pooled_brier = float(brier_score_loss(pooled_true, pooled_prob))
-        except Exception as e:
-            print(f"Pooled Brier error: {e}")
+    # pooled_auc = pooled_auprc = pooled_brier = np.nan
+    # if pooled_true.size>0 and pooled_prob.size>0:
+    #     try:
+    #         pooled_auc = float(roc_auc_score(pooled_true, pooled_prob))
+    #     except Exception as e:
+    #         print(f"Pooled AUROC error: {e}")
+    #     try:
+    #         pooled_auprc = float(average_precision_score(pooled_true, pooled_prob))
+    #     except Exception as e:
+    #         print(f"Pooled AUPRC error: {e}")
+    #     try:
+    #         pooled_brier = float(brier_score_loss(pooled_true, pooled_prob))
+    #     except Exception as e:
+    #         print(f"Pooled Brier error: {e}")
 
-    print(f"\nOOF pooled (concatenated across folds): AUROC={pooled_auc:.4f}, AUPRC={pooled_auprc:.4f}, Brier={pooled_brier:.4f}")
+    # Quick pooled metrics (no CI)
+    # print(f"\nOOF pooled (concatenated across folds): AUROC={pooled_auc:.4f}, AUPRC={pooled_auprc:.4f}, Brier={pooled_brier:.4f}")
 
     # ----------------------------
     # Plot pooled ROC / PR / Calibration with 95% CI via bootstrap
@@ -1129,13 +1018,17 @@ def main_finetune(config):
             precision = recall = np.array([])
 
         # Compute AUC / AUPRC / Brier and their 95% CI via bootstrap
-        pt_auc, l_auc, u_auc, n_auc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auroc', n_bootstrap=config.n_boot, seed=SEED)
-        pt_auprc, l_auprc, u_auprc, n_auprc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auprc', n_bootstrap=config.n_boot, seed=SEED+1)
-        pt_brier, l_brier, u_brier, n_brier_boots = bootstrap_ci(pooled_true, pooled_prob, metric='brier', n_bootstrap=config.n_boot, seed=SEED+2)
+        pt_auc, l_auc, u_auc, n_auc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auroc', n_bootstrap=config.n_boot, seed=config.seed)
+        pt_auprc, l_auprc, u_auprc, n_auprc_boots = bootstrap_ci(pooled_true, pooled_prob, metric='auprc', n_bootstrap=config.n_boot, seed=config.seed+1)
+        pt_brier, l_brier, u_brier, n_brier_boots = bootstrap_ci(pooled_true, pooled_prob, metric='brier', n_bootstrap=config.n_boot, seed=config.seed+2)
 
         auc_text = f"AUROC = {pt_auc:.3f}\n95% CI [{l_auc:.3f}, {u_auc:.3f}]"
         auprc_text = f"AUPRC = {pt_auprc:.3f}\n95% CI [{l_auprc:.3f}, {u_auprc:.3f}]"
         brier_text = f"Brier = {pt_brier:.3f}\n95% CI [{l_brier:.3f}, {u_brier:.3f}]"
+        print("\n[Summary] Pooled OOF performance (across folds):")
+        print(f"Pooled AUROC = {pt_auc:.4f}, 95% CI ({l_auc:.4f} to {u_auc:.4f})")
+        print(f"Pooled AUPRC = {pt_auprc:.4f}, 95% CI ({l_auprc:.4f} to {u_auprc:.4f})")
+        print(f"Pooled Brier = {pt_brier:.4f}, 95% CI ({l_brier:.4f} to {u_brier:.4f})")
 
         # Calibration curve 
         try:
@@ -1199,7 +1092,7 @@ def main_finetune(config):
         outpath = os.path.join(base_out_dir, 'pooled_roc_pr_calibration.pdf')
         plt.savefig(outpath, bbox_inches='tight', dpi=300)
         plt.close()
-        print(f"Saved pooled ROC/PR/Calibration figure: {outpath}")
+        print(f"\nSaved pooled ROC/PR/Calibration figure: {outpath}")
 
         # Save individual figures (ROC / PR / Calibration) 
         try:
